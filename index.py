@@ -29,8 +29,13 @@ logger = logging.getLogger("campaign-api")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 # Initialize FastAPI app
-app = FastAPI(title="Campaign Management API", version="1.0.0")
-
+app = FastAPI(
+    title="Campaign Management API",
+    version="1.0.0",
+    docs_url="/docs",       
+    redoc_url="/redoc",  
+    openapi_url="/openapi.json"
+)
 # Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
@@ -547,7 +552,7 @@ async def list_campaigns(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-        
+
 
 # if __name__ == "__main__":
 #     import uvicorn
