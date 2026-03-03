@@ -12,6 +12,7 @@ import base64
 from fastapi import Query, FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from bson import ObjectId
+from mangum import Mangum  # Adapter
 
 from models import CampaignRequest, CampaignResponse, CustomerSelection, CustomerBase
 from dependencies import ai, email_sender
@@ -553,6 +554,8 @@ async def list_campaigns(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+handler = Mangum(app)
 
 # if __name__ == "__main__":
 #     import uvicorn
