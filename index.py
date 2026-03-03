@@ -32,8 +32,8 @@ SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 app = FastAPI(
     title="Campaign Management API",
     version="1.0.0",
-    docs_url="/docs",       
-    redoc_url="/redoc",  
+    docs_url=None,        # Disable Swagger UI
+    redoc_url="/docs",    # Serve ReDoc at /docs
     openapi_url="/openapi.json"
 )
 # Add CORS middleware for frontend
