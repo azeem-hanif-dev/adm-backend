@@ -32,8 +32,9 @@ async def send_campaign_to_customers(
     sent_count = 0
     failed_count = 0
     failed_emails = []
-    
-    # Generate CID for image
+
+    logger.info(f"🚀 Campaign task started for {len(customers)} customers") 
+   # Generate CID for image
     brochure_cid = f"brochure_{campaign_id}"
     
     campaign_statuses[campaign_id] = {
@@ -66,7 +67,7 @@ async def send_campaign_to_customers(
                     campaign_prompt=campaign_prompt,
                     company_type=company_type
                 )
-                
+                logger.info(f"AI response: {out}")
                 if not isinstance(out, dict) or "html" not in out:
                     logger.error(f"Unexpected response from AI for {customer.email}")
                     failed_count += 1
@@ -82,6 +83,8 @@ async def send_campaign_to_customers(
                     final_html = html
                 
                 # Send email with company_type
+                logger.info(f"Sending email to {customer.email}")
+
                 success = await email_sender.send_email(
                     session=session,
                     recipient=customer.email,
@@ -92,8 +95,8 @@ async def send_campaign_to_customers(
                     brochure_filename=brochure_cid,
                     brochure_mime=brochure_mime,
                 )
-                
                 if success:
+                    logger.info(f"Email send result: {success}")
                     # Save conversation message
                     try:
                         await append_conversation_message(
