@@ -1,4 +1,4 @@
-# api/index.py - Fixed version with relative imports for Vercel deployment
+# main.py - Updated with Cloudinary integration
 import json
 import os
 import logging
@@ -13,23 +13,29 @@ from fastapi import Query, FastAPI, HTTPException, BackgroundTasks, UploadFile, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from bson import ObjectId
-
-# Use relative imports from the parent directory (project root)
-from ..models import CampaignRequest, CampaignResponse, CustomerSelection, CustomerBase
-from ..dependencies import ai, email_sender
-from .. import services
-from ..utils import convert_objectid_to_str
-from ..db import (
+from cloudinary_utils import upload_brochure_to_cloudinary
+import cloudinary
+from models import CampaignRequest, CampaignResponse, CustomerSelection, CustomerBase
+from dependencies import ai, email_sender
+import services
+from utils import convert_objectid_to_str
+from db import (
     get_all_customers,
     get_all_dcs_customers,
     get_all_gcc_leads,
     campaigns_coll,
-    sendgrid_events_coll
+    sendgrid_events_coll,
+    campaign_jobs_coll,
 )
 
 # Configure logging
 logger = logging.getLogger("campaign-api")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+WORKER_SECRET = os.getenv("WORKER_SECRET") 
+
+# Email validation regex
+EMAIL_REGEX = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -39,6 +45,7 @@ app = FastAPI(
     redoc_url="/redoc",        # ReDoc at /redoc
     openapi_url="/openapi.json"
 )
+
 # Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
@@ -48,10 +55,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Store campaign status (in production, use Redis or database)
-campaign_statuses = {}
+# ----------------------------------------------------------------------
+# Cloudinary upload helper
+# ----------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
 # API Endpoints
+# ----------------------------------------------------------------------
 @app.get("/")
 async def root():
     """Redirect to interactive API documentation"""
@@ -65,7 +75,6 @@ async def get_company_types():
         {"value": "dcs_customers", "label": "DCS Products"},
         {"value": "gcc_leads", "label": "GCC Leads"}
     ]
-
 
 @app.get("/api/customers", response_model=List[Dict[str, Any]])
 async def get_customers(
@@ -90,8 +99,6 @@ async def get_customers(
     except Exception as e:
         logger.error(f"Error fetching customers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 @app.get("/api/customers/dcs", response_model=List[Dict[str, Any]])
 async def get_dcs_customers():
@@ -160,52 +167,93 @@ async def select_customers(selection: CustomerSelection):
 @app.post("/api/campaigns/send", response_model=CampaignResponse)
 async def send_campaign(
     request: CampaignRequest,
-    background_tasks: BackgroundTasks
 ):
     """
-    Send campaign to selected customers
+    Enqueue a campaign to be processed by a background worker.
+    If brochure_image (base64) is provided, it will be uploaded to Cloudinary.
     """
     try:
         # Validate company_type
         valid_company_types = ["customers", "dcs_customers", "gcc_leads"]
         if request.company_type not in valid_company_types:
-            raise HTTPException(status_code=400, detail=f"Invalid company_type. Must be one of: {valid_company_types}")
-        
-        campaign_id = str(uuid.uuid4())
-        
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid company_type. Must be one of: {valid_company_types}",
+            )
+
         # Validate customers list
         if not request.customers:
             raise HTTPException(status_code=400, detail="No customers selected")
-        
-        # Start campaign in background
-        background_tasks.add_task(
-            services.send_campaign_to_customers,
-            campaign_id=campaign_id,
-            customers=request.customers,
-            campaign_name=request.campaign_name,
-            campaign_prompt=request.campaign_prompt,
-            subject=request.subject,
-            company_type=request.company_type,
-            ai=ai,
-            email_sender=email_sender,
-            campaign_statuses=campaign_statuses,
-            brochure_base64=request.brochure_image,
-            brochure_mime=request.brochure_mime_type
-        )
-        
+
+        campaign_id = str(uuid.uuid4())
+
+        # Prepare customers as plain dicts for storage in Mongo
+        customers_payload = [
+            {
+                "email": c.email,
+                "name": c.name,
+                "company_name": c.company_name,
+                "country": c.country,
+            }
+            for c in request.customers
+        ]
+
+        # Handle brochure if provided (base64)
+        pdf_url = None
+        preview_image_url = None
+        if request.brochure_image and request.brochure_mime_type:
+            try:
+                # Decode base64
+                brochure_bytes = base64.b64decode(request.brochure_image)
+                pdf_url, preview_image_url = await upload_brochure_to_cloudinary(
+                    brochure_bytes,
+                    folder="campaign_brochures"
+                )
+                if not pdf_url:
+                    logger.warning("Cloudinary upload failed for base64 brochure")
+            except Exception as e:
+                logger.error(f"Failed to process base64 brochure: {e}")
+
+        job_doc = {
+            "campaign_id": campaign_id,
+            "status": "pending",
+            "campaign_name": request.campaign_name,
+            "campaign_prompt": request.campaign_prompt,
+            "subject": request.subject,
+            "company_type": request.company_type,
+            "customers": customers_payload,
+            "total_customers": len(customers_payload),
+            "sent": 0,
+            "failed": 0,
+            "failed_emails": [],
+            # Cloudinary URLs
+            "pdf_url": pdf_url,
+            "preview_image_url": preview_image_url,
+            # Keep old fields for backward compatibility (optional)
+            "brochure_base64": request.brochure_image if not pdf_url else None,
+            "brochure_mime": request.brochure_mime_type if not pdf_url else None,
+            "created_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow(),
+            "started_at": None,
+            "finished_at": None,
+            "next_index": 0,
+        }
+
+        await campaign_jobs_coll.insert_one(job_doc)
+
         response = CampaignResponse(
             campaign_id=campaign_id,
-            status="started",
+            status="queued",
             total_customers=len(request.customers),
             sent_count=0,
             failed_count=0,
-            start_time=datetime.datetime.utcnow()
+            start_time=datetime.datetime.utcnow(),
         )
-        
+
         return response
-        
+
     except Exception as e:
-        logger.error(f"Error starting campaign: {e}")
+        logger.error(f"Error enqueueing campaign: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/campaigns/send-with-file")
@@ -214,80 +262,129 @@ async def send_campaign_with_file(
     campaign_prompt: str = Form(...),
     subject: str = Form(...),
     company_type: str = Form(...),
-    customers: str = Form(...),  # JSON string of CustomerBase list
+    customers: str = Form(...),  # JSON string of customers
     brochure_file: Optional[UploadFile] = File(None),
-    background_tasks: BackgroundTasks = None
 ):
     """
-    Alternative endpoint with file upload for brochure
+    Sends a campaign to customers with an optional brochure file (PDF or image).
+    The file is uploaded to Cloudinary; URLs are stored in the job document.
     """
+    from utils import clean_country_value
+
     try:
-        # Parse customers - it should be a JSON array
+        # parse JSON
         customer_data = json.loads(customers)
-        
-        # Handle both single customer object and array of customers
         if isinstance(customer_data, dict):
             customer_list = [customer_data]
         elif isinstance(customer_data, list):
             customer_list = customer_data
         else:
-            raise ValueError("Customers must be a list or a single customer object")
-        
-        # Validate and convert to CustomerBase objects
-        validated_customers = []
-        for i, cust_data in enumerate(customer_list):
-            # Clean NaN values if present
-            country = cust_data.get('country')
-            # Use relative import for utility function
-            from ..utils import clean_country_value
-            cust_data['country'] = clean_country_value(country)
-            
-            # Create CustomerBase object
-            customer = CustomerBase(
-                email=cust_data['email'],
-                name=cust_data.get('name', 'Customer'),
-                company_name=cust_data.get('company_name'),
-                country=cust_data.get('country')
-            )
-            validated_customers.append(customer)
-        
-        # Process brochure file if provided
-        brochure_base64 = None
-        brochure_mime = None
-        
+            raise HTTPException(status_code=400, detail="Customers must be a list or dict")
+
+        validated_customers: List[CustomerBase] = []
+
+        for i, cust in enumerate(customer_list):
+            try:
+                # Fix name
+                name = cust.get("name") or cust.get("company_name") or "Customer"
+                name = str(name).strip()
+
+                # Fix country
+                country = clean_country_value(cust.get("country"))
+
+                # Clean and split emails
+                raw_email = cust.get("email", "")
+                if not raw_email or not isinstance(raw_email, str):
+                    logger.warning(f"[Index {i}] No email, skipping customer")
+                    continue
+
+                # Split multiple emails separated by comma, semicolon, space
+                email_list = re.split(r"[,\s;]+", raw_email)
+                email_list = [e.strip().lower() for e in email_list if e.strip()]
+
+                for email in email_list:
+                    try:
+                        # Validate email format
+                        if not re.match(EMAIL_REGEX, email):
+                            logger.warning(f"[Index {i}] Invalid email '{email}', skipping")
+                            continue
+
+                        # Create CustomerBase object
+                        customer = CustomerBase(
+                            email=email,
+                            name=name,
+                            company_name=cust.get("company_name"),
+                            country=country
+                        )
+                        validated_customers.append(customer)
+
+                    except Exception as e:
+                        logger.warning(f"[Index {i}] Pydantic error for email '{email}': {e}")
+                        continue
+
+            except Exception as e:
+                logger.warning(f"[Index {i}] Skipping invalid customer: {e}")
+                continue
+
+        # Process brochure file: upload to Cloudinary if provided
+        pdf_url = None
+        preview_image_url = None
         if brochure_file:
             brochure_bytes = await brochure_file.read()
-            brochure_base64 = base64.b64encode(brochure_bytes).decode('utf-8')
-            brochure_mime = brochure_file.content_type or "image/jpeg"
-        
+            pdf_url, preview_image_url = await upload_brochure_to_cloudinary(
+                brochure_bytes,
+                brochure_file.filename,
+                folder="campaign_brochures"
+            )
+            logger.info(f"Cloudinary upload result: pdf_url={pdf_url}, preview_url={preview_image_url}")
+            if not pdf_url:
+                logger.warning("Cloudinary upload failed for brochure file")
+
+
+        # Create campaign ID and enqueue job
         campaign_id = str(uuid.uuid4())
-        
-        # Start campaign in background
-        background_tasks.add_task(
-            services.send_campaign_to_customers,
-            campaign_id=campaign_id,
-            customers=validated_customers,
-            campaign_name=campaign_name,
-            campaign_prompt=campaign_prompt,
-            subject=subject,
-            company_type=company_type,
-            ai=ai,
-            email_sender=email_sender,
-            campaign_statuses=campaign_statuses,
-            brochure_base64=brochure_base64,
-            brochure_mime=brochure_mime
-        )
-        
+
+        customers_payload = [
+            {
+                "email": c.email,
+                "name": c.name,
+                "company_name": c.company_name,
+                "country": c.country,
+            }
+            for c in validated_customers
+        ]
+
+        job_doc = {
+            "campaign_id": campaign_id,
+            "status": "pending",
+            "campaign_name": campaign_name,
+            "campaign_prompt": campaign_prompt,
+            "subject": subject,
+            "company_type": company_type,
+            "customers": customers_payload,
+            "total_customers": len(customers_payload),
+            "sent": 0,
+            "failed": 0,
+            "failed_emails": [],
+            "pdf_url": pdf_url,                    # <-- add this
+            "preview_image_url": preview_image_url, # <-- add this
+            "created_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow(),
+            "started_at": None,
+            "finished_at": None,
+            "next_index": 0,
+        }
+
+        await campaign_jobs_coll.insert_one(job_doc)
+
         return {
             "campaign_id": campaign_id,
-            "status": "started",
-            "message": "Campaign processing started",
+            "status": "queued",
+            "message": "Campaign job queued for processing",
             "total_customers": len(validated_customers),
-            "company_type": company_type
+            "company_type": company_type,
         }
-        
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON for customers")
+
     except Exception as e:
         logger.error(f"Error in send_campaign_with_file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -297,10 +394,60 @@ async def get_campaign_status(campaign_id: str):
     """
     Get status of a running/completed campaign
     """
-    if campaign_id not in campaign_statuses:
+    job = await campaign_jobs_coll.find_one({"campaign_id": campaign_id})
+    if not job:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    
-    return campaign_statuses[campaign_id]
+
+    return {
+        "campaign_id": job.get("campaign_id"),
+        "status": job.get("status"),
+        "total": job.get("total_customers", 0),
+        "sent": job.get("sent", 0),
+        "failed": job.get("failed", 0),
+        "failed_emails": job.get("failed_emails", []),
+        "pdf_url": job.get("pdf_url"),
+        "preview_image_url": job.get("preview_image_url"),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "company_type": job.get("company_type"),
+    }
+
+@app.post("/api/campaigns/worker-tick")
+async def campaign_worker_tick(
+    request: Request,
+    batch_size: int = 25,
+    secret: Optional[str] = None
+):
+    # Verify secret (can be passed as query param or header)
+    if not secret or secret != WORKER_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid secret")
+    """
+    Process a small batch of emails for the next pending/running campaign job.
+    Intended for use with Vercel Cron or manual triggering.
+    """
+    # Pick the oldest pending or running job
+    job = await campaign_jobs_coll.find_one(
+        {"status": {"$in": ["pending", "running"]}},
+        sort=[("created_at", 1)],
+    )
+    if not job:
+        return {"status": "idle", "message": "No pending jobs"}
+
+    job_id = str(job["_id"])
+    result = await services.process_campaign_job_batch(
+        job_id=job_id,
+        batch_size=batch_size,
+        ai=ai,
+        email_sender=email_sender,
+    )
+
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "campaign_id": job.get("campaign_id"),
+        **result,
+    }
 
 @app.get("/api/campaigns/history")
 async def get_campaign_history(limit: int = 50, skip: int = 0):
@@ -321,11 +468,8 @@ async def get_campaign_history(limit: int = 50, skip: int = 0):
         logger.error(f"Error fetching campaign history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
-
 @app.post("/api/sendgrid/webhook")
-async def sendgrid_webhook(request: Request):   # <- Added Request type hint
+async def sendgrid_webhook(request: Request):
     """
     Receives SendGrid events: delivered, bounce, click, spamreport
     Stores events in MongoDB collection `sendgrid_events_coll`
@@ -354,9 +498,6 @@ async def sendgrid_webhook(request: Request):   # <- Added Request type hint
         logger.info("Stored %d SendGrid events", len(docs))
 
     return {"status": "ok", "stored_events": len(docs)}
-
-
-
 
 @app.get("/api/campaigns/dashboard")
 async def get_campaign_dashboard():
@@ -479,7 +620,6 @@ async def get_campaign_stats(campaign_id: str):
         logger.error(f"Error fetching campaign stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/api/campaigns/listing")
 async def list_campaigns(
     page: int = Query(1, ge=1),
@@ -522,7 +662,8 @@ async def list_campaigns(
                 "campaign_name": c.get("campaign_name"),
                 "subject": c.get("subject"),
                 "sent_at": c.get("sent_at"),
-                "brochure_filename": c.get("brochure_filename"),
+                "pdf_url": c.get("pdf_url"),
+                "preview_image_url": c.get("preview_image_url"),
             }
 
             # Sanitize numeric fields
@@ -542,9 +683,6 @@ async def list_campaigns(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
 
 if __name__ == "__main__":
     import uvicorn

@@ -4,9 +4,10 @@ import textwrap
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 import re
 from typing import Dict, Any, Optional, List
+
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class CampaignAI:
             raise ValueError("Missing DEEPSEEK_API_KEY")
 
         # Initialize DeepSeek client (shared by all agents)
-        self.client = OpenAI(
+        self.client = AsyncOpenAI(  # <-- AsyncOpenAI
             api_key=api_key,
             base_url="https://api.deepseek.com"
         )
@@ -350,15 +351,14 @@ class CampaignAI:
             prompt += "\n\nIMPORTANT: Write this email in Dutch, keeping the same professional, warm, and personal style."
         return prompt
 
-    def _call_deepseek(self, messages: list, temperature: float = 1.3):
+    async def _call_deepseek(self, messages: list, temperature: float = 1.3):
         """Make DeepSeek API call with reasoning enabled."""
-        return self.client.chat.completions.create(
-            model="deepseek-chat",
+        return await self.client.chat.completions.create(
+             model="deepseek-reasoner",
             messages=messages,
-            temperature=temperature,
-            max_tokens=1200,
+            #temperature=temperature,
+            max_tokens=4000,
             stream=False,
-            extra_body={"thinking": {"type": "enabled"}}
         )
 
     def _extract_html(self, response) -> str:
@@ -391,7 +391,7 @@ class CampaignAI:
     # MAIN CAMPAIGN GENERATION METHOD
     # ============================================
 
-    def generate_campaign_message(
+    async def generate_campaign_message(
         self,
         customer_id: str,
         customer_info: Dict[str, Any],
@@ -489,7 +489,7 @@ class CampaignAI:
 
         # Call DeepSeek API
         try:
-            response = self._call_deepseek(messages, temperature=config["default_temperature"])
+            response = await self._call_deepseek(messages, temperature=config["default_temperature"])
             html = self._extract_html(response)
             
             if not html:

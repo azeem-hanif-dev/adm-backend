@@ -1,13 +1,11 @@
 # ADM
 Auto Digital Marketer
 # ADM Campaign Management System
+.
 
 ## 📋 Overview
-
 ADM (Automated Digital Marketing) Campaign Management System is a FastAPI-based platform for managing email marketing campaigns. It integrates AI agents (Megan, Anna, Ashley) to generate personalized email content and SendGrid for email delivery.
-
 ## 🚀 Features
-
 - **Multi-Company Support**: Manage campaigns for 3 different companies (Cappah, DCS Products, GCC Leads)
 - **AI-Powered Content**: Three specialized AI agents generate personalized email content
 - **Email Campaigns**: Send bulk emails with inline images and attachments
@@ -86,7 +84,6 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 #### GET `/api/customers/gcc-leads`
 **Description:** Get all GCC leads  
 **Response:** List of GCC lead objects
-
 #### POST `/api/customers/select`
 **Description:** Select customers by type and optional email filtering  
 **Request Body:**

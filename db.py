@@ -25,6 +25,7 @@ customers_coll = db["Customers"]
 dcs_customers_coll = db["DCS-Customers"]
 gcc_leads_coll = db["gcc-leads"]  # New collection
 sendgrid_events_coll = db["SendGridEvents"]
+campaign_jobs_coll = db["CampaignJobs"]
 
 
 # Helpful async functions

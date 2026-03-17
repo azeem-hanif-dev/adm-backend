@@ -68,3 +68,26 @@ def clean_country_value(country: Any) -> str:
     if isinstance(country, float) and math.isnan(country):
         return ""
     return str(country)
+# utils.py (add this function)
+def inject_preview_image(html: str, pdf_url: str, image_url: str) -> str:
+    """
+    Replace [MEDIA_PLACEHOLDER] with an inline image (JPEG preview) linked to the PDF.
+    """
+    linked_image = (
+        f'<p style="text-align:center;">'
+        f'<a href="{pdf_url}" target="_blank" rel="noopener noreferrer">'
+        f'<img src="{image_url}" alt="Brochure – click to open PDF" '
+        f'style="width:100%; max-width:600px; border-radius:12px; display:block; margin:auto;">'
+        f'</a>'
+        f'</p>'
+    )
+    if "[MEDIA_PLACEHOLDER]" in html:
+        return html.replace("[MEDIA_PLACEHOLDER]", linked_image)
+    # fallback: insert after second paragraph
+    lower = html.lower()
+    first_idx = lower.find("</p>")
+    if first_idx != -1:
+        second_idx = lower.find("</p>", first_idx + 4)
+        insert_pos = second_idx + 4 if second_idx != -1 else first_idx + 4
+        return html[:insert_pos] + linked_image + html[insert_pos:]
+    return linked_image + html

@@ -1,14 +1,20 @@
 {
   "builds": [
     {
-      "src": "api/index.py",
+      "src": "index.py",
       "use": "@vercel/python"
+    }
+  ],
+    "crons": [
+    {
+      "path": "/api/campaigns/worker-tick?secret=your_secret_here&batch_size=20",
+      "schedule": "*/5 * * * *"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "api/index.py"
+      "dest": "index.py"
     }
   ]
 }

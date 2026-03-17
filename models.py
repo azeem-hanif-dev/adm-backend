@@ -1,10 +1,11 @@
 # models.py
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, EmailStr, Field
+# from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 class CustomerBase(BaseModel):
-    email: EmailStr
+    email: str
     name: str
     company_name: Optional[str] = None
     country: Optional[str] = None
